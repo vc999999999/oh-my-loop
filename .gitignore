@@ -1,0 +1,4 @@
+node_modules/
+# .loop/ 运行时:state.json/journal/escalations/units 要提交(可 review/可恢复),
+# 只有 snapshot/(byte-perfect 回滚 blob,harness 内部物)不提交。
+.loop/snapshot/

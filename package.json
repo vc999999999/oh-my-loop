@@ -1,0 +1,22 @@
+{
+  "name": "opencode-loop-controller",
+  "version": "0.0.0",
+  "description": "External control loop for OpenCode — state machine + budget guard + autonomy gate",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "loop": "./src/cli.ts"
+  },
+  "scripts": {
+    "loop": "bun run src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}

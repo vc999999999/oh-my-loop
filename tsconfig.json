@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "skipLibCheck": true,
+    "moduleResolution": "bundler",
+    "target": "es2022",
+    "module": "esnext",
+    "noEmit": true,
+    "types": ["bun"],
+    "lib": ["es2023"],
+    "verbatimModuleSyntax": false,
+    "allowImportingTsExtensions": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "loop.config.ts"]
+}
