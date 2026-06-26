@@ -7,13 +7,17 @@
  * status : 打印 .loop/STATE.md + 预算用量。
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import defaultConfig, { type LoopConfig } from "../loop.config.ts";
 import { runController } from "./controller.ts";
 import { createDailyTriageMode } from "./modes/daily-triage-mode.ts";
 import { createTaskMode } from "./modes/task-mode.ts";
 import { createStateStore } from "./state-store.ts";
+import { createJournal } from "./journal.ts";
+import { createLedger } from "./ledger.ts";
+import { createEscalator } from "./escalation.ts";
+import { mergeWorktree } from "./worktree.ts";
 import type { GateSpec } from "./gates.ts";
 
 function loadConfig(): LoopConfig {
@@ -88,6 +92,96 @@ async function cmdTask(): Promise<number> {
   return result.outcome === "done" ? 0 : result.outcome === "escalated" ? 2 : 1;
 }
 
+/**
+ * loop approve <escId|unitId> [--note "..."] —— F4 批准闭环。
+ * 人批准 L2 提案后,自动 merge 对应 unit 的 worktree 回 base,写 escalation.resolution。
+ * loop reject <id> 则只写驳回决议,不合并。
+ */
+function cmdApprove(approve: boolean): number {
+  const config = loadConfig();
+  const target = process.argv[3];
+  if (!target) {
+    console.log(`usage: loop ${approve ? "approve" : "reject"} <escalationId|unitId> [--note "..."]`);
+    return 1;
+  }
+  const noteIdx = process.argv.indexOf("--note");
+  const note = noteIdx >= 0 ? process.argv[noteIdx + 1] : undefined;
+
+  const store = createStateStore(config.loopDir);
+  const loaded = store.load();
+  if (loaded.kind !== "loaded") {
+    console.log(`no loadable state at ${config.loopDir} (${loaded.kind})`);
+    return 1;
+  }
+  const state = loaded.state;
+  const journal = createJournal(config.loopDir);
+  const escalator = createEscalator(config.loopDir, journal);
+
+  // target 可能是 escalation id 或 unit id
+  let esc = escalator.read(target);
+  let unitId = esc?.unitId ?? target;
+  if (!esc) {
+    // 按 unitId 找最近一条未解决的 escalation
+    const escDir = join(config.loopDir, "escalations");
+    if (existsSync(escDir)) {
+      for (const f of readdirSync(escDir).sort().reverse()) {
+        const e = escalator.read(f.replace(/\.json$/, ""));
+        if (e && !e.resolution && (e.unitId === target || e.affectedUnits.includes(target))) {
+          esc = e;
+          unitId = e.unitId ?? target;
+          break;
+        }
+      }
+    }
+  }
+
+  if (!approve) {
+    if (esc) escalator.resolve(esc.id, "rejected", note);
+    console.log(`✗ rejected${esc ? ` ${esc.id}` : ""}${unitId ? ` (unit ${unitId})` : ""}`);
+    return 0;
+  }
+
+  // 批准:merge 该 unit 的 worktree 回 base
+  const merge = mergeWorktree(config.target, unitId, config.baseBranch);
+  if (esc) escalator.resolve(esc.id, "approved", note);
+  const unit = state.units.find((u) => u.id === unitId);
+  if (unit) unit.status = "done";
+  store.persist(state);
+
+  if (merge.conflict) {
+    console.log(`⚠️ approved but MERGE CONFLICT on unit ${unitId} — 需手动解决:\n${merge.output.slice(-500)}`);
+    return 2;
+  }
+  if (!merge.merged) {
+    console.log(`⚠️ approved but merge failed for unit ${unitId}:\n${merge.output.slice(-500)}`);
+    return 2;
+  }
+  console.log(`✓ approved & merged unit ${unitId} → ${config.baseBranch ?? "base"}`);
+  return 0;
+}
+
+/** loop budget —— 跨会话累计用量 + 阈值告警(F1)。 */
+function cmdBudget(): number {
+  const config = loadConfig();
+  const ledger = createLedger(config.loopDir);
+  const t = ledger.totals();
+  console.log("── 跨会话预算账本 (.loop/budget-ledger.ndjson) ──");
+  console.log(`runs: ${t.runs}`);
+  console.log(`iterations: ${t.iterations}`);
+  console.log(`tokens(in/out): ${t.inputTokens}/${t.outputTokens}`);
+  console.log(`cost: $${t.costUsd.toFixed(4)}`);
+  if (config.ledgerThreshold) {
+    const alerts = ledger.checkThresholds(config.ledgerThreshold);
+    if (alerts.length) {
+      console.log("\n⚠️ 阈值告警:");
+      for (const a of alerts) console.log(`  - ${a}`);
+      return 2;
+    }
+    console.log("\n✅ 未超阈值");
+  }
+  return 0;
+}
+
 function cmdStatus(): number {
   const config = loadConfig();
   const stateMd = join(config.loopDir, "STATE.md");
@@ -119,11 +213,20 @@ async function main(): Promise<void> {
     case "task":
       code = await cmdTask();
       break;
+    case "approve":
+      code = cmdApprove(true);
+      break;
+    case "reject":
+      code = cmdApprove(false);
+      break;
+    case "budget":
+      code = cmdBudget();
+      break;
     case "status":
       code = cmdStatus();
       break;
     default:
-      console.log("usage: loop <run|resume|task|status>");
+      console.log("usage: loop <run|resume|task|approve|reject|budget|status>");
       code = 1;
   }
   process.exit(code);

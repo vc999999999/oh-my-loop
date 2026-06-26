@@ -40,8 +40,9 @@ export function errorFingerprint(error: string | undefined | null): string {
   const normalized = error
     .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}[^\s]*/g, "<ts>") // 时间戳
     .replace(/\/[^\s:]+/g, "<path>") // 绝对路径
-    .replace(/:\d+:\d+/g, ":<pos>") // 行列号
+    .replace(/:\d+(:\d+)?/g, ":<pos>") // 行号 / 行:列
     .replace(/0x[0-9a-f]+/gi, "<addr>") // 地址
+    .replace(/\b\d+\b/g, "<n>") // 其余裸数字
     .trim();
   return sha1(normalized);
 }

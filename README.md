@@ -33,9 +33,22 @@ LOOP_USE_AGENT=1 LOOP_TARGET=/path/to/repo bun run src/cli.ts run   # 带 AI 总
 LOOP_TARGET=/path/to/repo bun run src/cli.ts task "你的任务" \
   --scope src/ --gate "pnpm test" --neg "false" --level L3 --allow src/ --base main
 
+# L2 批准闭环:人批准提案后自动合并(reject 则驳回)
+LOOP_TARGET=/path/to/repo bun run src/cli.ts approve <unitId|escalationId> [--note "..."]
+LOOP_TARGET=/path/to/repo bun run src/cli.ts reject  <unitId|escalationId>
+
+# 跨会话预算账本 + 阈值告警
+LOOP_TARGET=/path/to/repo bun run src/cli.ts budget
+
 # 查看状态
 LOOP_TARGET=/path/to/repo bun run src/cli.ts status
 ```
+
+命令一览:`run`(L1 巡检)· `task`(L1-L3 单任务流水线)· `approve`/`reject`(L2 批准闭环)· `budget`(跨会话账本)· `status`。
+
+### 多任务队列 + 依赖图
+
+代码方式用 `createQueueMode([...])`(见 [src/modes/queue-mode.ts](src/modes/queue-mode.ts)):一次播种多个带 `dependsOn` 的 unit,控制器按依赖拓扑依次跑,成环自动 escalate(deadlock)。串行编排走主控制器,并行编排见 [src/parallel.ts](src/parallel.ts)。
 
 `loop task` 参数:`--scope`(允许写的路径,越界回滚)·`--gate`(验证命令)·`--neg`(negative control,必须失败)·`--level L1|L2|L3` · `--allow`(L3 自动合并白名单)· `--base`(合并目标分支)。
 
@@ -60,12 +73,13 @@ LOOP_TARGET=/path/to/repo bun run src/cli.ts status
 | `src/safety.ts` | 安全门 fail-closed(破坏性命令/密钥写入拦截) |
 | `src/integrate.ts` | L1 none / L2 propose / L3 auto(白名单)+ 冲突检测 |
 | `src/parallel.ts` | Phase 3 并行编排:拓扑批次并发 + 串行合并冲突隔离 |
-| `src/modes/` | daily-triage(L1 只读)/ task(通用流水线) |
+| `src/ledger.ts` | 跨会话预算账本(budget-ledger.ndjson)+ 阈值告警 |
+| `src/modes/` | daily-triage(L1 只读)/ task(单任务)/ queue(多任务+依赖图) |
 
 ## 测试
 
 ```bash
-bun test          # 22 个:8 故障注入 + Phase1(5)+ Phase2(4)+ Phase3(4)+ 不变量
+bun test          # 31 个:8 故障注入 + Phase1-3(13)+ 不变量 + escalation/approve(3)+ queue(3)+ ledger(3)
 bunx tsc --noEmit # strict 类型检查
 ```
 

@@ -33,6 +33,8 @@ export type LoopConfig = {
   gates?: GateSpec[];
   /** 合并回的基分支(默认当前分支)。 */
   baseBranch?: string;
+  /** F1:跨会话累计预算告警阈值(.loop/budget-ledger.ndjson)。 */
+  ledgerThreshold?: { totalCostUsd?: number; totalTokens?: number };
 };
 
 const target = process.env.LOOP_TARGET ?? process.cwd();

@@ -238,6 +238,12 @@ export const Escalation = z.object({
     recommended: z.boolean().default(false),
   })).default([]),
   humanQuestion: z.string(),                // 一句话:需要人回答什么
+  /** 去重指纹:reason + 归一化 lastError。同指纹的多次升级合并成一条。 */
+  fingerprint: z.string().optional(),
+  /** 被同一 root cause 影响的所有 unit(聚合后 >1)。 */
+  affectedUnits: z.array(z.string()).default([]),
+  /** 同指纹被合并的次数(首次=1)。 */
+  occurrences: z.number().int().positive().default(1),
   resolution: z.object({                    // 人回答后写回
     answeredAt: z.string().datetime(),
     chosen: z.string(),

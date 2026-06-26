@@ -32,6 +32,7 @@ import { detectOutOfScope, revertCascade } from "./scope.ts";
 import { runGates } from "./gates.ts";
 import { integrateUnit } from "./integrate.ts";
 import { defaultReviewer } from "./reviewer.ts";
+import { createLedger } from "./ledger.ts";
 import { join } from "node:path";
 
 export type CycleOutcome = {
@@ -48,6 +49,8 @@ export type CycleOutcome = {
 export type Mode = {
   /** triage:无 pending unit 时,造出本轮要做的 unit(含 cycles)。 */
   planUnit: (state: LoopState_File, config: LoopConfig) => UnitT;
+  /** 队列模式(可选):首次一次性播种多个 unit(可带 dependsOn)。提供后控制器按依赖拓扑依次跑。 */
+  seedUnits?: (state: LoopState_File, config: LoopConfig) => UnitT[];
   /** 跑一个 cycle(只读 explore 等)。 */
   runCycle: (args: {
     state: LoopState_File;
@@ -77,7 +80,7 @@ export type ControllerResult = {
   state: LoopState_File;
 };
 
-export async function runController(
+async function runControllerInner(
   config: LoopConfig,
   mode: Mode,
   deps: ControllerDeps = {},
@@ -109,6 +112,14 @@ export async function runController(
   } else {
     state = initState(store, config);
     journal.append({ event: "triggered", state: "trigger", detail: { resumed: false } });
+  }
+
+  // —— 队列模式:首次播种多个 unit(带 dependsOn)——
+  if (state.units.length === 0 && mode.seedUnits) {
+    const seeded = mode.seedUnits(state, config);
+    state.units.push(...seeded);
+    journal.append({ event: "units_seeded", detail: { count: seeded.length, ids: seeded.map((u) => u.id) } });
+    store.persist(state);
   }
 
   // 跨轮的停止条件历史
@@ -146,17 +157,29 @@ export async function runController(
       return { outcome: "escalated", reason: stop.reason, state };
     }
 
-    // —— triage:选 unit ——
+    // —— triage:选 unit(依赖感知)——
     let unit = pickActiveUnit(state);
     if (!unit) {
-      // 无 pending unit:目标达成?
-      if (allUnitsDone(state)) {
+      const pending = state.units.filter((u) => u.status === "pending" || u.status === "running");
+      if (pending.length > 0) {
+        // 有 pending 但没一个 deps 满足 → 依赖死锁 / 环
+        escalator.escalate(state, {
+          reason: "stuck_no_progress",
+          humanQuestion: `依赖死锁:这些 unit 的 dependsOn 无法满足(可能成环或依赖了 blocked 单元):${pending.map((u) => u.id).join(", ")}`,
+          lastError: "dependency deadlock",
+          risk: "medium",
+        });
+        store.persist(state);
+        return { outcome: "escalated", reason: "deadlock", state };
+      }
+      if (state.units.length > 0) {
+        // 没有 pending(全 done,或剩下的已 blocked 并各自 escalate 过)→ 收尾
         state.state = "done";
-        journal.append({ event: "done", state: "done" });
+        journal.append({ event: "done", state: "done", detail: { allDone: allUnitsDone(state) } });
         store.persist(state);
         return { outcome: "done", state };
       }
-      // 否则 plan 一个新 unit
+      // 无任何 unit(单 unit 模式)→ plan 一个
       state.state = "triage";
       unit = mode.planUnit(state, config);
       state.units.push(unit);
@@ -164,6 +187,7 @@ export async function runController(
       journal.append({ event: "unit_planned", unit: unit.id, detail: { cycles: unit.cycles.length } });
       store.persist(state);
     }
+    state.activeUnitId = unit.id;
 
     // —— 隔离 + 快照(Phase 1):unit 第一次激活时建 worktree + pre-run snapshot ——
     const workdir = ensureUnitWorkspace(unit, config, journal);
@@ -373,6 +397,31 @@ export async function runController(
   return { outcome: "halted", reason: "max_loops", state };
 }
 
+/**
+ * runController —— 对外入口。跑控制器,然后把本次 run 的用量记进跨会话账本(F1),
+ * 并按 config.ledgerThreshold 做累计阈值告警。
+ */
+export async function runController(
+  config: LoopConfig,
+  mode: Mode,
+  deps: ControllerDeps = {},
+): Promise<ControllerResult> {
+  const result = await runControllerInner(config, mode, deps);
+  try {
+    const ledger = createLedger(config.loopDir);
+    ledger.record(result.state.goal.id, result.outcome, result.state.budget.usage);
+    if (config.ledgerThreshold) {
+      const alerts = ledger.checkThresholds(config.ledgerThreshold);
+      if (alerts.length) {
+        (deps.journal ?? createJournal(config.loopDir)).append({ event: "budget_alert", detail: { alerts } });
+      }
+    }
+  } catch {
+    /* 账本 best-effort,不影响主流程 */
+  }
+  return result;
+}
+
 function initState(store: StateStore, config: LoopConfig): LoopState_File {
   return store.init({
     goalStatement: `${config.mode} on ${config.target}`,
@@ -391,12 +440,18 @@ function initState(store: StateStore, config: LoopConfig): LoopState_File {
   });
 }
 
+/** 一个 unit 的 dependsOn 是否全部 done。 */
+function depsMet(state: LoopState_File, u: UnitT): boolean {
+  return (u.dependsOn ?? []).every((d) => state.units.find((x) => x.id === d)?.status === "done");
+}
+
 function pickActiveUnit(state: LoopState_File): UnitT | undefined {
   if (state.activeUnitId) {
     const u = state.units.find((x) => x.id === state.activeUnitId);
-    if (u && u.status !== "done") return u;
+    if (u && u.status !== "done" && u.status !== "blocked" && depsMet(state, u)) return u;
   }
-  return state.units.find((u) => u.status === "pending" || u.status === "running");
+  // 选第一个「pending/running 且依赖已满足」的 unit
+  return state.units.find((u) => (u.status === "pending" || u.status === "running") && depsMet(state, u));
 }
 
 function allUnitsDone(state: LoopState_File): boolean {
