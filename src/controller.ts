@@ -22,7 +22,7 @@ import { createStateStore, type StateStore } from "./state-store.ts";
 import { createJournal, type Journal } from "./journal.ts";
 import { createEscalator, type Escalator } from "./escalation.ts";
 import { defaultPredicates, shouldStop, type StopPredicate, type StopContext } from "./stop-conditions.ts";
-import { accumulate } from "./budget.ts";
+import { accumulate, totalTokens } from "./budget.ts";
 import { progressFingerprint, errorFingerprint } from "./progress.ts";
 import type { StepUsage } from "./opencode-runner.ts";
 import type { LoopConfig } from "../loop.config.ts";
@@ -31,6 +31,7 @@ import { createSnapshotManager } from "./snapshot.ts";
 import { detectOutOfScope, revertCascade } from "./scope.ts";
 import { runGates } from "./gates.ts";
 import { integrateUnit } from "./integrate.ts";
+import { writeUnitArtifacts } from "./unit-artifacts.ts";
 import { defaultReviewer } from "./reviewer.ts";
 import { createLedger } from "./ledger.ts";
 import { join } from "node:path";
@@ -145,13 +146,37 @@ async function runControllerInner(
     };
     const stop = shouldStop(predicates, ctx);
     if (stop.stop) {
+      const isResource =
+        stop.reason === "cost" || stop.reason === "token" || stop.reason === "iteration" ||
+        stop.reason === "wallclock" || stop.reason === "deadman";
+      // 现场快照:让预算/卡住型交人也能一眼看清「为什么停、烧了多少、最近在挣扎什么」
+      const activeUnit = state.activeUnitId ? state.units.find((u) => u.id === state.activeUnitId) : undefined;
       escalator.escalate(state, {
-        reason: stop.reason === "cost" || stop.reason === "token" || stop.reason === "iteration" || stop.reason === "wallclock" || stop.reason === "deadman"
-          ? "budget"
-          : "stuck_no_progress",
+        reason: isResource ? "budget" : "stuck_no_progress",
+        unitId: activeUnit?.id ?? null,
+        attempts: iteration,
         humanQuestion: `loop 被停止条件 [${stop.reason}] 熔断,是否调整预算/介入?`,
         lastError: `stop: ${stop.reason}`,
         risk: "medium",
+        diffSummary: activeUnit?.worktree ? wtDiffSummary(activeUnit.worktree, config.baseBranch ?? "HEAD") : undefined,
+        stopContext: {
+          firedPredicate: stop.reason!,
+          iteration,
+          tokens: totalTokens(state.budget.usage),
+          costUsd: state.budget.usage.costUsd,
+          wallClockMs: now() - Date.parse(state.budget.usage.startedAt),
+          recentErrors: errHist.slice(-5),
+          recentProgress: progHist.slice(-5),
+        },
+        recommendedOptions: isResource
+          ? [
+              { label: "提高预算并继续", detail: `当前命中 ${stop.reason};放宽对应 limit 后重跑同一 .loop/state.json`, recommended: true },
+              { label: "就此停止", detail: "接受当前进度,不再投入预算" },
+            ]
+          : [
+              { label: "人工接管该 unit", detail: `loop 在 [${stop.reason}] 上空转,需人判断卡点`, recommended: true },
+              { label: "调整任务/scope 后重跑", detail: "可能是任务本身无解或 scope 太窄" },
+            ],
       });
       store.persist(state);
       return { outcome: "escalated", reason: stop.reason, state };
@@ -195,7 +220,8 @@ async function runControllerInner(
     // —— 选 unit 的下一个 pending cycle ——
     const cycle = unit.cycles.find((c) => c.status === "pending" || c.status === "running");
     if (!cycle) {
-      // 单元完成 → integrate(按自治等级)
+      // 单元完成 → 先把可审计产物落盘(diff 必须在 merge 前抓),再 integrate(按自治等级)
+      writeUnitArtifacts(config.loopDir, unit, { baseBranch: config.baseBranch ?? "HEAD" });
       const integ = integrateUnit(state, unit, { root: config.target, baseBranch: config.baseBranch });
       journal.append({ event: "integrate", unit: unit.id, detail: { kind: integ.kind } });
       if (integ.kind === "conflict") {
@@ -231,6 +257,8 @@ async function runControllerInner(
       }
       // recorded(L1)/ merged(L3 成功)
       unit.status = "done";
+      // 回写终态 + integrate 结果(diff.patch 已在 merge 前抓好,空 patch 不覆盖)
+      writeUnitArtifacts(config.loopDir, unit, { baseBranch: config.baseBranch ?? "HEAD", integrate: integ.kind });
       mode.onUnitDone?.(state, unit, config);
       state.activeUnitId = null;
       journal.append({ event: "unit_done", unit: unit.id, detail: { integrate: integ.kind } });
@@ -258,6 +286,7 @@ async function runControllerInner(
         // verifier 不可信 → 直接 escalate(不当成功也不当普通失败)
         cycle.status = "blocked";
         cycle.lastError = `gates ${gr.verdict}: ${failDesc}`;
+        writeUnitArtifacts(config.loopDir, unit, { baseBranch: config.baseBranch ?? "HEAD", integrate: "blocked" });
         escalator.escalate(state, {
           reason: "verifier_invalid",
           unitId: unit.id,
@@ -370,6 +399,7 @@ async function runControllerInner(
       unit.lastError = outcome.lastError ?? undefined;
       if (cycle.attempts >= cycle.maxAttempts) {
         cycle.status = "blocked";
+        writeUnitArtifacts(config.loopDir, unit, { baseBranch: config.baseBranch ?? "HEAD", integrate: "blocked" });
         escalator.escalate(state, {
           reason: "retries_exhausted",
           unitId: unit.id,

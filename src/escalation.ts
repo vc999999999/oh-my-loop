@@ -30,6 +30,16 @@ export type EscalateArgs = {
   risk?: "low" | "medium" | "high";
   recommendedOptions?: { label: string; detail: string; recommended?: boolean }[];
   humanQuestion: string;
+  /** 预算/卡住型熔断的现场快照(reason=budget/stuck_no_progress 时填)。 */
+  stopContext?: {
+    firedPredicate: string;
+    iteration: number;
+    tokens: number;
+    costUsd: number;
+    wallClockMs: number;
+    recentErrors?: string[];
+    recentProgress?: string[];
+  };
 };
 
 export function createEscalator(loopDir: string, journal: Journal) {
@@ -106,6 +116,7 @@ export function createEscalator(loopDir: string, journal: Journal) {
       fingerprint: fp,
       affectedUnits: args.unitId ? [args.unitId] : [],
       occurrences: 1,
+      stopContext: args.stopContext,
     });
     write(esc);
     state.escalationIds.push(id);

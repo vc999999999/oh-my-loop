@@ -2,3 +2,6 @@ node_modules/
 # .loop/ 运行时:state.json/journal/escalations/units 要提交(可 review/可恢复),
 # 只有 snapshot/(byte-perfect 回滚 blob,harness 内部物)不提交。
 .loop/snapshot/
+# opencode / 控制器运行时产物(跑 task 时生成,非源码)
+.opencode/
+.logs/

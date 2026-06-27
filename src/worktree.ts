@@ -126,6 +126,16 @@ export function diffSummary(worktreePath: string, baseBranch: string): string {
   }
 }
 
+/** worktree 相对 base 的完整 patch(落盘到 .loop/units/<id>/diff.patch 用)。 */
+export function diffPatch(worktreePath: string, baseBranch: string): string {
+  try {
+    return execSync(`git diff ${baseBranch}`, { cwd: worktreePath, maxBuffer: 32 * 1024 * 1024, stdio: "pipe" })
+      .toString();
+  } catch {
+    return "";
+  }
+}
+
 function currentBranch(root: string): string {
   try {
     return git(root, "rev-parse --abbrev-ref HEAD");

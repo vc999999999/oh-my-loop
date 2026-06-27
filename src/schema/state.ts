@@ -244,6 +244,20 @@ export const Escalation = z.object({
   affectedUnits: z.array(z.string()).default([]),
   /** 同指纹被合并的次数(首次=1)。 */
   occurrences: z.number().int().positive().default(1),
+  /**
+   * 预算/卡住型熔断的现场快照。reason=budget/stuck_no_progress 时填:
+   * 是哪条 predicate 命中、当时烧了多少、最近的错误/进度指纹。
+   * 让「预算型交人」也有足够上下文一眼决策(对齐 design/escalation.md)。
+   */
+  stopContext: z.object({
+    firedPredicate: z.string(),             // 命中的停止条件名(cost/no_progress/...)
+    iteration: z.number().int().nonnegative(),
+    tokens: z.number().int().nonnegative(),
+    costUsd: z.number().nonnegative(),
+    wallClockMs: z.number().int().nonnegative(),
+    recentErrors: z.array(z.string()).default([]),
+    recentProgress: z.array(z.string()).default([]),
+  }).optional(),
   resolution: z.object({                    // 人回答后写回
     answeredAt: z.string().datetime(),
     chosen: z.string(),
