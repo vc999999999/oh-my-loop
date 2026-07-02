@@ -61,3 +61,20 @@
 ## 一句话
 
 goal 的 10 条已覆盖控制器主干;我补的主要是**持久化一致性(O1/O2)**和**进度判定的鲁棒性(O3)**这两处「魔鬼在细节」的地方——它们正是故障注入 #1/#5 真正考验的东西。其余都标了「Phase 几再做」,守住蓝图「小而连贯的核心」的底线。
+
+---
+
+## 2026-07-02 二轮优化(交付后复盘 → 已全部落地)
+
+来源:prompt-conduct 交付后的全局复盘,四项结构性优化,全部带回归测试
+([tests/optimizations.test.ts](../tests/optimizations.test.ts),54/54 pass + typecheck clean)。
+
+| # | 优化 | 落点 | 机制 |
+|---|---|---|---|
+| P1 | explore 计划复用(原来 implement 从零摸仓库,探查白花) | schema `Unit.explorePlan` + prompts/task-mode/queue-mode | explore 成功的 finalText 持久化在 unit 上(resume 不丢),注入 implement prompt(截断 4000 字防稀释) |
+| P2 | checker 只读从软约束升级为可硬化 | `LoopConfig.agents{maker,checker}` → runSession `--agent` | 在 opencode 配置里定义受限 agent 后,`--checker <agent>` 即工具级只读;不配则保持现状 |
+| P3 | resume 预算刷新(原来提额重跑撞旧 limits 立刻再熔断) | controller 载入分支 | limits 以本次 config 为准(usage 照旧累计),墙钟起点重置——跨会话等人批准的时间不计入 |
+| P4 | 单 cycle 与全 loop 墙钟拆分(原来一个字段身兼两职,慢网络下互相打架) | schema `perCycleWallClockMs` + modes/reviewer + cli `--budget-min/--cycle-min` | 不设 perCycle 则沿用 maxWallClockMs(旧行为零破坏) |
+
+仍留待后续:效果 A/B(旧短 prompt vs conduct prompt 的回滚率/首过率/轮数对比)
+——需稳定网络下的批量真实任务,框架(journal + ledger + roi)已就绪。

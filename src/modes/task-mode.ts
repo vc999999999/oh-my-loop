@@ -9,6 +9,7 @@
 import { Unit } from "../schema/state.ts";
 import type { Mode, CycleOutcome } from "../controller.ts";
 import { runSession } from "../opencode-runner.ts";
+import { explorePrompt, implementPrompt } from "../prompts.ts";
 
 export type TaskSpec = {
   id: string;
@@ -41,25 +42,30 @@ export function createTaskMode(task: TaskSpec): Mode {
       const commonRun = {
         cwd,
         model: config.model ?? null,
+        agent: config.agents?.maker ?? null,
         deadManMs: config.budget.deadManMs ?? 300_000,
-        wallClockMs: config.budget.maxWallClockMs ?? 900_000,
+        wallClockMs: config.budget.perCycleWallClockMs ?? config.budget.maxWallClockMs ?? 900_000,
       };
 
       if (cycle.type === "explore") {
         const run = await runSession({
           ...commonRun,
-          prompt: `只读探查仓库,为这个任务规划改动范围(不要改任何文件):${task.instruction}`,
+          prompt: explorePrompt(task.instruction),
         });
+        // 计划持久化在 unit 上(state.json),implement 复用,resume 不丢
+        if (run.signal === "cycle_complete" && run.finalText) unit.explorePlan = run.finalText;
         return toOutcome(run);
       }
 
       if (cycle.type === "implement") {
-        const errCtx = cycle.lastError ? `\n\n上一轮 verify 失败,必须修复:${cycle.lastError}` : "";
         const run = await runSession({
           ...commonRun,
-          prompt:
-            `实现以下任务。只改这些路径范围内的文件:${task.scope.join(", ") || "(无限制)"}。` +
-            `写完确保代码可运行。\n\n任务:${task.instruction}${errCtx}`,
+          prompt: implementPrompt({
+            instruction: task.instruction,
+            scope: task.scope,
+            lastError: cycle.lastError,
+            plan: unit.explorePlan,
+          }),
         });
         // 注意:不在此 commit。控制器会在 scope 越界回滚之后再 commit,
         // 否则越界文件会先被固化进 commit,git restore/clean 回滚不掉。

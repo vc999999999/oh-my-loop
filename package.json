@@ -10,7 +10,9 @@
   "scripts": {
     "loop": "bun run src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "smoke": "bun run scripts/live-smoke.ts",
+    "e2e": "bun run scripts/e2e-live.ts"
   },
   "dependencies": {
     "zod": "^3.23.8"

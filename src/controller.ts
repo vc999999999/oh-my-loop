@@ -88,7 +88,7 @@ async function runControllerInner(
 ): Promise<ControllerResult> {
   const store = deps.store ?? createStateStore(config.loopDir);
   const journal = deps.journal ?? createJournal(config.loopDir);
-  const escalator = deps.escalator ?? createEscalator(config.loopDir, journal);
+  const escalator = deps.escalator ?? createEscalator(config.loopDir, journal, config.notify);
   const predicates = deps.predicates ?? defaultPredicates;
   const now = deps.now ?? (() => Date.now());
   const maxLoops = deps.maxLoops ?? 1000;
@@ -98,7 +98,13 @@ async function runControllerInner(
   let state: LoopState_File;
   if (loaded.kind === "loaded") {
     state = loaded.state;
-    journal.append({ event: "triggered", state: state.state, detail: { resumed: true } });
+    // resume 时 limits 以本次 config 为准:否则「提高预算重跑同一 state.json」永远
+    // 撞旧 limits 立刻再熔断。usage(iterations/cost)照旧累计,只刷上限。
+    const overrides = Object.fromEntries(Object.entries(config.budget).filter(([, v]) => v !== undefined));
+    state.budget.limits = Budget.shape.limits.parse({ ...state.budget.limits, ...overrides });
+    // 墙钟是「本次进程」守卫:跨会话等人批准的时间不该计入,resume 重置起点。
+    state.budget.usage.startedAt = new Date().toISOString();
+    journal.append({ event: "triggered", state: state.state, detail: { resumed: true, limitsRefreshed: true } });
   } else if (loaded.kind === "corrupt") {
     // 损坏:不静默续跑。init 一个新的并立即 escalate(corrupt 已备份)。
     state = initState(store, config);
@@ -355,7 +361,9 @@ async function runControllerInner(
     errHist.push(errorFingerprint(outcome.lastError));
     progHist.push(progressFingerprint(state, config.target));
     // noToolCall 只对真正驱动了 agent 的 cycle 有意义;本地确定性步骤不计入。
-    if (outcome.ranAgent) toolHist.push(outcome.toolCallCount);
+    // error 轮(spawn/provider 失败)也不计入:agent 没得到行动机会,不是空转;
+    // 重复错误由 sameErrorRepeatLimit + maxAttempts 兜底。
+    if (outcome.ranAgent && outcome.signal !== "error") toolHist.push(outcome.toolCallCount);
 
     cycle.signal = outcome.signal;
     cycle.turns = (cycle.turns ?? 0) + 1;
@@ -377,8 +385,8 @@ async function runControllerInner(
       });
       store.persist(state);
       return { outcome: "escalated", reason: "needs_input", state };
-    } else if (outcome.signal === "error") {
-      // 进程级失败:硬停该 cycle,不重试
+    } else if (outcome.signal === "error" && !isTransientProviderError(outcome.lastError)) {
+      // 进程级失败(非瞬态):硬停该 cycle,不重试
       cycle.status = "blocked";
       cycle.lastError = outcome.lastError ?? undefined;
       escalator.escalate(state, {
@@ -393,7 +401,8 @@ async function runControllerInner(
       store.persist(state);
       return { outcome: "escalated", reason: "error", state };
     } else {
-      // partial:重试或耗尽
+      // partial / 瞬态 provider 错误:重试或耗尽
+      // (瞬态错误的硬兜底不变:maxAttempts、sameErrorRepeatLimit、budget 熔断)
       cycle.attempts++;
       cycle.lastError = outcome.lastError ?? undefined;
       unit.lastError = outcome.lastError ?? undefined;
@@ -416,9 +425,13 @@ async function runControllerInner(
         event: "cycle_retry",
         unit: unit.id,
         cycle: cycle.id,
-        signal: "cycle_partial",
+        signal: outcome.signal,
         detail: { attempts: cycle.attempts },
       });
+      if (outcome.signal === "error") {
+        // 瞬态错误退避:立刻重连大概率撞上同一网络抖动(live 实测 explore→implement 连续 spawn 触发)
+        await sleep(config.transientBackoffMs ?? Math.min(5_000 * cycle.attempts, 15_000));
+      }
     }
 
     store.persist(state);
@@ -450,6 +463,22 @@ export async function runController(
     /* 账本 best-effort,不影响主流程 */
   }
   return result;
+}
+
+/**
+ * 瞬态 provider/网络错误 → 按 partial 重试而非硬停。
+ * 保守白名单:只认网络层与限流特征;业务/进程错误一律仍硬停 escalate。
+ * (live 实测:GLM provider 在连续 spawn 时偶发 "unknown certificate verification error"。)
+ */
+const TRANSIENT_PROVIDER_ERROR =
+  /certificat|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|EPIPE|socket|network|rate.?limit|429|too many requests|overloaded|timed?.?out/i;
+
+function isTransientProviderError(msg: string | null): boolean {
+  return !!msg && TRANSIENT_PROVIDER_ERROR.test(msg);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function initState(store: StateStore, config: LoopConfig): LoopState_File {
@@ -544,8 +573,9 @@ async function defaultReviewerAdapter(args: {
     criterion: args.cycle.lastError ? `${args.unit.title}(上轮:${args.cycle.lastError})` : args.unit.title,
     changedFiles: changed,
     model: args.config.model ?? null,
+    agent: args.config.agents?.checker ?? null,
     deadManMs: args.config.budget.deadManMs ?? 300_000,
-    wallClockMs: args.config.budget.maxWallClockMs ?? 900_000,
+    wallClockMs: args.config.budget.perCycleWallClockMs ?? args.config.budget.maxWallClockMs ?? 900_000,
   });
 }
 

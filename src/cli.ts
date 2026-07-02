@@ -16,6 +16,7 @@ import { createTaskMode } from "./modes/task-mode.ts";
 import { createStateStore } from "./state-store.ts";
 import { createJournal } from "./journal.ts";
 import { createLedger } from "./ledger.ts";
+import { computeRoi } from "./roi.ts";
 import { createEscalator } from "./escalation.ts";
 import { mergeWorktree } from "./worktree.ts";
 import type { GateSpec } from "./gates.ts";
@@ -42,13 +43,14 @@ async function cmdRun(): Promise<number> {
 /**
  * loop task —— Phase 1+ 真实任务流水线(explore→implement→verify→integrate)。
  * 用法:loop task "<指令>" --scope src/ --gate "<cmd>" --neg "<cmd>" [--level L2|L3] [--allow src/]
- * env LOOP_TARGET 指定目标 repo。
+ *       [--budget-min 45] [--cycle-min 10] [--maker <agent>] [--checker <agent>]
+ * env LOOP_TARGET 指定目标 repo。慢 provider 下建议放宽 --budget-min(默认 15)。
  */
 async function cmdTask(): Promise<number> {
   const args = process.argv.slice(3);
   const instruction = args.find((a) => !a.startsWith("--")) ?? "";
   if (!instruction) {
-    console.log('usage: loop task "<指令>" --scope src/ --gate "<cmd>" --neg "<cmd>" [--level L2|L3] [--allow src/]');
+    console.log('usage: loop task "<指令>" --scope src/ --gate "<cmd>" --neg "<cmd>" [--level L2|L3] [--allow src/] [--budget-min 45] [--cycle-min 10] [--maker <agent>] [--checker <agent>]');
     return 1;
   }
   const opt = (name: string): string | undefined => {
@@ -60,6 +62,10 @@ async function cmdTask(): Promise<number> {
   const negCmd = opt("neg") ?? "false"; // 默认 negative control = 必失败
   const level = (opt("level") ?? "L2") as "L1" | "L2" | "L3";
   const allow = (opt("allow") ?? scope.join(",")).split(",").map((s) => s.trim()).filter(Boolean);
+  const minutes = (name: string): number | undefined => {
+    const v = opt(name);
+    return v && Number(v) > 0 ? Number(v) * 60_000 : undefined;
+  };
 
   const base = defaultConfig;
   const gates: GateSpec[] = gateCmd
@@ -71,6 +77,12 @@ async function cmdTask(): Promise<number> {
     isolate: true,
     baseBranch: opt("base") ?? undefined,
     gates,
+    budget: {
+      ...base.budget,
+      maxWallClockMs: minutes("budget-min") ?? base.budget.maxWallClockMs,
+      perCycleWallClockMs: minutes("cycle-min") ?? base.budget.perCycleWallClockMs,
+    },
+    agents: opt("maker") || opt("checker") ? { maker: opt("maker"), checker: opt("checker") } : base.agents,
     autonomy: {
       level,
       allowCodeWrite: true,
@@ -182,6 +194,24 @@ function cmdBudget(): number {
   return 0;
 }
 
+/** loop roi —— 采纳率 / 投入产出。回答「技术自嗨还是真省事」。 */
+function cmdRoi(): number {
+  const config = loadConfig();
+  const r = computeRoi(config.loopDir);
+  console.log("── ROI / 采纳率 (.loop/escalations + journal + ledger) ──");
+  console.log(`人工裁决: 批准 ${r.approved} / 驳回 ${r.rejected}（共 ${r.decided}）, 待裁决 ${r.pending}`);
+  console.log(`自动合并(L3): ${r.autoMerged}  ·  只读产出(L1): ${r.recorded}`);
+  console.log(`累计成本: $${r.totalCostUsd.toFixed(4)}`);
+  console.log(
+    `人工采纳率: ${r.acceptRate === null ? "—（暂无裁决）" : (r.acceptRate * 100).toFixed(0) + "%"}` +
+      `  ·  单位成本/被接受产出: ${r.costPerAccepted === null ? "—" : "$" + r.costPerAccepted.toFixed(4)}`,
+  );
+  const badge = r.verdict === "healthy" ? "✅ healthy" : r.verdict === "lossmaking" ? "🔴 lossmaking" : "⚪ insufficient_data";
+  console.log(`\nverdict: ${badge}`);
+  for (const w of r.warnings) console.log(`  ⚠️ ${w}`);
+  return r.verdict === "lossmaking" ? 2 : 0;
+}
+
 function cmdStatus(): number {
   const config = loadConfig();
   const stateMd = join(config.loopDir, "STATE.md");
@@ -222,11 +252,14 @@ async function main(): Promise<void> {
     case "budget":
       code = cmdBudget();
       break;
+    case "roi":
+      code = cmdRoi();
+      break;
     case "status":
       code = cmdStatus();
       break;
     default:
-      console.log("usage: loop <run|resume|task|approve|reject|budget|status>");
+      console.log("usage: loop <run|resume|task|approve|reject|budget|roi|status>");
       code = 1;
   }
   process.exit(code);

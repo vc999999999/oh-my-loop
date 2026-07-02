@@ -18,6 +18,7 @@ import {
 import { errorFingerprint } from "./progress.ts";
 import { createHash } from "node:crypto";
 import type { Journal } from "./journal.ts";
+import type { Notifier } from "./notify.ts";
 
 export type EscalateArgs = {
   reason: EscalationReason;
@@ -42,7 +43,7 @@ export type EscalateArgs = {
   };
 };
 
-export function createEscalator(loopDir: string, journal: Journal) {
+export function createEscalator(loopDir: string, journal: Journal, notify?: Notifier) {
   const escDir = join(loopDir, "escalations");
 
   function fingerprintOf(args: EscalateArgs): string {
@@ -129,6 +130,21 @@ export function createEscalator(loopDir: string, journal: Journal) {
       cycle: args.cycleId ?? null,
       detail: { id, humanQuestion: args.humanQuestion, fingerprint: fp },
     });
+    // 真·报警:只对新建 escalation 发(聚合那条故意不发,避免刷屏)。best-effort。
+    if (notify) {
+      try {
+        notify({
+          id,
+          reason: args.reason,
+          risk: args.risk ?? "medium",
+          humanQuestion: args.humanQuestion,
+          unitId: args.unitId ?? null,
+          loopDir,
+        });
+      } catch {
+        /* 告警失败绝不拖垮主 loop */
+      }
+    }
     return id;
   }
 

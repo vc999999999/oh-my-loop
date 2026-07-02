@@ -104,7 +104,9 @@ export const BudgetLimits = z.object({
   maxIterations: z.number().int().positive().optional(),     // iterationCountIs
   maxTokens: z.number().int().positive().optional(),         // tokenCountIs
   maxCostUsd: z.number().positive().optional(),              // costIs
-  maxWallClockMs: z.number().int().positive().optional(),    // wallClockExceeds
+  maxWallClockMs: z.number().int().positive().optional(),    // wallClockExceeds(整个 loop 总墙钟)
+  /** 单个 cycle 的 opencode run 墙钟上限;不设则沿用 maxWallClockMs(旧行为)。 */
+  perCycleWallClockMs: z.number().int().positive().optional(),
   maxTurnsPerCycle: z.number().int().positive().default(500),// cortex SAFETY_TURN_CAP
   deadManMs: z.number().int().positive().default(20 * 60_000), // 无输出超时 → hung
   sameErrorRepeatLimit: z.number().int().positive().default(3), // sameErrorRepeats
@@ -209,6 +211,8 @@ export const Unit = z.object({
   lastError: z.string().optional(),
   /** 进度指纹:用于 noProgress 检测(连续相同 = 无进展)。 */
   progressFingerprint: z.string().optional(),
+  /** explore cycle 的产出计划,注入后续 implement prompt(持久化,resume 不丢)。 */
+  explorePlan: z.string().optional(),
 });
 export type Unit = z.infer<typeof Unit>;
 

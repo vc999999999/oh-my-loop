@@ -9,6 +9,7 @@
 import { Unit } from "../schema/state.ts";
 import type { Mode, CycleOutcome } from "../controller.ts";
 import { runSession } from "../opencode-runner.ts";
+import { explorePrompt, implementPrompt } from "../prompts.ts";
 
 export type QueueTask = {
   id: string;
@@ -40,19 +41,25 @@ export function createQueueMode(tasks: QueueTask[]): Mode {
       const common = {
         cwd,
         model: config.model ?? null,
+        agent: config.agents?.maker ?? null,
         deadManMs: config.budget.deadManMs ?? 300_000,
-        wallClockMs: config.budget.maxWallClockMs ?? 900_000,
+        wallClockMs: config.budget.perCycleWallClockMs ?? config.budget.maxWallClockMs ?? 900_000,
       };
 
       if (cycle.type === "explore") {
-        const run = await runSession({ ...common, prompt: `只读探查,为任务规划改动(不要改文件):${task.instruction}` });
+        const run = await runSession({ ...common, prompt: explorePrompt(task.instruction) });
+        if (run.signal === "cycle_complete" && run.finalText) unit.explorePlan = run.finalText;
         return toOutcome(run);
       }
       if (cycle.type === "implement") {
-        const errCtx = cycle.lastError ? `\n\n上轮 verify 失败,必须修复:${cycle.lastError}` : "";
         const run = await runSession({
           ...common,
-          prompt: `实现任务,只改这些路径:${task.scope.join(", ") || "(无限制)"}。\n\n任务:${task.instruction}${errCtx}`,
+          prompt: implementPrompt({
+            instruction: task.instruction,
+            scope: task.scope,
+            lastError: cycle.lastError,
+            plan: unit.explorePlan,
+          }),
         });
         return toOutcome(run);
       }

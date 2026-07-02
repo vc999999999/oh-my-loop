@@ -10,6 +10,7 @@
 
 import { runSession } from "./opencode-runner.ts";
 import { parseAndValidate } from "./verify.ts";
+import { verifierPrompt } from "./prompts.ts";
 import type { CycleOutcome } from "./controller.ts";
 
 export type ReviewArgs = {
@@ -17,24 +18,20 @@ export type ReviewArgs = {
   criterion: string;
   changedFiles: string[];
   model?: string | null;
+  /** 受限 checker agent(工具级只读);不配则 opencode 默认 agent + prompt 软约束。 */
+  agent?: string | null;
   deadManMs: number;
   wallClockMs: number;
 };
 
-const VERIFIER_PROMPT = (criterion: string, files: string[]) =>
-  `你是独立验证者,职责是 REFUTE(证伪)而非确认。你看不到实现者的任何推理。\n` +
-  `只读检查这个仓库是否满足验收标准。改动文件:${files.join(", ") || "(未知)"}。\n\n` +
-  `验收标准:${criterion}\n\n` +
-  `严禁修改任何文件。最后只输出一行 JSON:{"verdict":"pass"|"fail","gates":[]}。` +
-  `不确定或无法判定时输出 {"verdict":"fail"}。`;
-
-/** 默认 reviewer:全新 session 跑 verifier,Zod 兜底解析 verdict。 */
+/** 默认 reviewer:全新 session 跑 verifier(prompt 见 prompts.verifierPrompt),Zod 兜底解析 verdict。 */
 export async function defaultReviewer(args: ReviewArgs): Promise<CycleOutcome> {
   const run = await runSession({
-    prompt: VERIFIER_PROMPT(args.criterion, args.changedFiles),
+    prompt: verifierPrompt(args.criterion, args.changedFiles),
     cwd: args.workdir,
     sessionId: null, // ★ 全新 session:与 maker 的上下文物理隔离
     model: args.model ?? null,
+    agent: args.agent ?? null,
     deadManMs: args.deadManMs,
     wallClockMs: args.wallClockMs,
   });

@@ -7,6 +7,7 @@
 
 import type { BudgetLimits } from "./src/schema/state.ts";
 import type { GateSpec } from "./src/gates.ts";
+import { stderrNotifier, type Notifier } from "./src/notify.ts";
 
 export type LoopConfig = {
   /** 要托管/扫描的目标 repo 绝对路径。默认运行控制器时的 cwd。 */
@@ -27,6 +28,13 @@ export type LoopConfig = {
   budget: Partial<BudgetLimits>;
   /** 跑 opencode run 用的 model(可选,默认用 opencode 配置的默认 model)。 */
   model?: string;
+  /**
+   * opencode agent 名(--agent)。不配 = opencode 默认 build agent(全工具)。
+   * 硬权限收紧靠这里:在目标仓库/全局 opencode 配置里定义受限 agent
+   * (checker 建议 tools 只留 read/grep/glob/bash,mode: subagent),
+   * 让 checker 的「只读」从 prompt 软约束升级为工具级硬保证。
+   */
+  agents?: { maker?: string; checker?: string };
   /** Phase 1+:每个 unit 在隔离 worktree 内干活。Phase 0 daily-triage 为 false。 */
   isolate?: boolean;
   /** Phase 1+:verify cycle 跑的门(命令 + negative control)。 */
@@ -35,6 +43,13 @@ export type LoopConfig = {
   baseBranch?: string;
   /** F1:跨会话累计预算告警阈值(.loop/budget-ledger.ndjson)。 */
   ledgerThreshold?: { totalCostUsd?: number; totalTokens?: number };
+  /** 瞬态 provider 错误重试前的退避毫秒;默认 min(5s×attempts, 15s)。测试可设小值。 */
+  transientBackoffMs?: number;
+  /**
+   * escalation 告警通道(真·Notify)。默认 stderrNotifier(喊到 stderr)。
+   * 接 Slack/钉钉:`notify: webhookNotifier(url)`;同时多发:`multiNotifier(stderrNotifier, webhookNotifier(url))`。
+   */
+  notify?: Notifier;
 };
 
 const target = process.env.LOOP_TARGET ?? process.cwd();
@@ -57,6 +72,7 @@ export const defaultConfig: LoopConfig = {
     noProgressIterations: 3,
     noToolCallIterations: 2,
   },
+  notify: stderrNotifier,
 };
 
 export default defaultConfig;
